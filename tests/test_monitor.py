@@ -93,6 +93,15 @@ class AnalyzeTest(unittest.TestCase):
         r = analyze("[알리] GMKtec K12($189) GMKtec M8($150) /무료", "")
         self.assertAlmostEqual(r["price"], 189)
 
+    def test_other_7640hs_product_in_title(self):
+        title = "[특가마지막날] GMKtec M6 7640HS ($164), FIREBAT F1 7640HS ($312), 샤오신 GT13($281)"
+        self.assertAlmostEqual(analyze(title, "", F1_7640)["price"], 312)
+
+    def test_h255_without_firebat_prefix(self):
+        title = "[재입고] GMKtec M6 7640HS 미니PC($164), FIREBAT R3 7430U($216), F1 H255($340)"
+        self.assertAlmostEqual(analyze(title, "", F1_H255)["price"], 340)
+        self.assertIsNone(analyze(title, "", F1_7640))
+
 
 if __name__ == "__main__":
     unittest.main()

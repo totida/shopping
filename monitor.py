@@ -25,8 +25,13 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 BOARD_ID = "ppomppu8"
-SEARCH_URL = ("https://www.ppomppu.co.kr/search_bbs.php?search_type=sub_memo&page_no={page}"
-              "&keyword={kw}&page_size=50&bbs_id={board}&order_type=date")
+SEARCH_URL = ("https://www.ppomppu.co.kr/search_bbs.php?search_type={stype}&page_no={page}"
+              "&keyword={kw}&bbs_id={board}&order_type={order}")
+# 통합검색은 검색어 하나당 최근 45개 정도(5개 x 9페이지)만 보여준다.
+# 과거 글 수집 시에는 '제목만'(결과가 적어 더 과거까지 닿음)과 '정확도순'을 섞어 범위를 넓힌다.
+SEARCH_MODES_RECENT = [("sub_memo", "date")]
+SEARCH_MODES_BACKFILL = [("sub_memo", "date"), ("subject", "date"), ("sub_memo", "relevance"), ("subject", "relevance")]
+REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "3"))
 VIEW_URL = "https://www.ppomppu.co.kr/zboard/view.php?id={board}&no={no}"
 
 THRESHOLD_USD = float(os.environ.get("THRESHOLD_USD", "200"))
@@ -107,6 +112,7 @@ def _rx(p):
     return re.compile(p, re.I)
 
 
+FIREBAT_RE = _rx(r"firebat|파이어\s?뱃")
 F1_RE = _rx(r"(?:firebat|파이어\s?뱃)\s*f1(?![0-9])")
 
 # 감시 대상 상품.
@@ -124,13 +130,14 @@ PRODUCTS = [
     },
     {
         "key": "firebat-f1-7640hs", "name": "FIREBAT F1 7640HS",
-        "anchor": _rx(r"7640\s?hs"), "search": ["7640HS"],
-        "match": [F1_RE], "price_anchor": F1_RE, "alert": False,
+        # "GMKtec M6 7640HS" 같은 다른 7640HS 제품과 구분하려고 F1 바로 뒤의 7640HS 만 인정
+        "anchor": _rx(r"(?<![a-z0-9])f1(?![0-9])[^$()\n,/]{0,25}?7640\s?hs"), "search": ["7640HS"],
+        "match": [FIREBAT_RE], "price_anchor": F1_RE, "alert": False,
     },
     {
         "key": "firebat-f1-h255", "name": "FIREBAT F1 H255",
-        "anchor": _rx(r"(?<![a-z0-9])h\s?255(?![0-9])"), "search": ["H255"],
-        "match": [F1_RE], "price_anchor": F1_RE, "alert": False,
+        "anchor": _rx(r"(?<![a-z0-9])f1(?![0-9])[^$()\n,/]{0,40}?h\s?255(?![0-9])"), "search": ["H255"],
+        "match": [FIREBAT_RE], "price_anchor": F1_RE, "alert": False,
     },
     {
         # 세부 모델(7640HS/H255)을 알 수 없는 FIREBAT F1 글. 위 두 모델로 분류되지 않을 때만 기록.
@@ -273,21 +280,32 @@ def analyze_post(post):
 # ---------------------------------------------------------------- collecting
 
 
+def search(kw, page, stype, order):
+    q = urllib.parse.quote(kw, encoding="cp949")
+    url = SEARCH_URL.format(stype=stype, page=page, kw=q, board=BOARD_ID, order=order)
+    found = parse_search(fetch(url))
+    time.sleep(REQUEST_DELAY)
+    if not found and page == 1:
+        time.sleep(REQUEST_DELAY * 5)  # 연속 요청 제한일 수 있어 쉬었다가 한 번 더
+        found = parse_search(fetch(url))
+        time.sleep(REQUEST_DELAY)
+    return found
+
+
 def collect():
     """상품별 검색어로 통합검색 → {no: post}. post['hits'] = 검색에 걸린 상품 key 집합."""
     posts = {}
     for product in PRODUCTS:
         for kw in product["search"]:
-            q = urllib.parse.quote(kw, encoding="cp949")
-            for page in range(1, (MAX_PAGES if SINCE else 1) + 1):
-                found = parse_search(fetch(SEARCH_URL.format(page=page, kw=q, board=BOARD_ID)))
-                time.sleep(1)
-                print(f"search '{kw}' page {page}: {len(found)} posts")
-                for p in found:
-                    posts.setdefault(p["no"], {**p, "hits": set()})["hits"].add(product["key"])
-                dates = [p["date"] for p in found if p["date"]]
-                if not found or (SINCE and dates and min(dates) < SINCE):
-                    break
+            for stype, order in (SEARCH_MODES_BACKFILL if SINCE else SEARCH_MODES_RECENT):
+                for page in range(1, (MAX_PAGES if SINCE else 1) + 1):
+                    found = search(kw, page, stype, order)
+                    print(f"search '{kw}' {stype}/{order} page {page}: {len(found)} posts")
+                    for p in found:
+                        posts.setdefault(p["no"], {**p, "hits": set()})["hits"].add(product["key"])
+                    dates = [p["date"] for p in found if p["date"]]
+                    if not found or (SINCE and order == "date" and dates and min(dates) < SINCE):
+                        break
     if SINCE:
         posts = {no: p for no, p in posts.items() if not p["date"] or p["date"] >= SINCE}
     return posts
@@ -334,9 +352,15 @@ def github_api(method, path, data=None):
         return json.loads(resp.read() or "null")
 
 
-def already_alerted(no):
+def _norm(t):
+    return re.sub(r"\W", "", t)[:60]
+
+
+def already_alerted(no, post_title):
+    """같은 글, 또는 같은 제목으로 다시 올라온 글이면 이미 알린 것으로 본다."""
     issues = github_api("GET", "/issues?state=all&labels=price-alert&per_page=100")
-    return any(f"#{no}]" in i["title"] for i in issues)
+    key = _norm(post_title)
+    return any(f"#{no}]" in i["title"] or (key and key in _norm(i["title"])) for i in issues)
 
 
 def notify(hit):
@@ -364,7 +388,7 @@ def notify(hit):
     if DRY_RUN or not os.environ.get("GITHUB_TOKEN"):
         print("[DRY] would alert:", title)
         return
-    if already_alerted(hit["post_no"]):
+    if already_alerted(hit["post_no"], hit["title"][:80]):
         print("already alerted:", hit["post_no"])
         return
     github_api("POST", "/issues", {"title": title, "body": body, "labels": ["price-alert"]})
