@@ -2,7 +2,8 @@ name: GMKtec K12 price monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # 30분마다 (GitHub 사정으로 몇 분 늦을 수 있음)
+    # 정각은 GitHub 예약 실행이 몰려 밀리거나 빠지기 쉬워 7분·37분에 실행
+    - cron: "7,37 * * * *"  # 30분마다 (GitHub 사정으로 몇 분 늦을 수 있음)
   workflow_dispatch:
 
 permissions:
