@@ -1,0 +1,47 @@
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import monitor  # noqa: E402
+
+
+class AnalyzeTest(unittest.TestCase):
+    def test_title_price(self):
+        r = monitor.analyze("[알리익스프레스] GMKtec K12 미니PC 베어본 ($189.99/무료)", "본문")
+        self.assertAlmostEqual(r["price"], 189.99)
+        self.assertEqual(r["source"], "title")
+
+    def test_body_only_mention(self):
+        body = "오늘 미니PC 특가 모음\nGMKtec K12 32GB/1TB 쿠폰 적용시 $179 입니다.\n다른상품 $50"
+        r = monitor.analyze("[알리] 미니PC 모음 특가", body)
+        self.assertAlmostEqual(r["price"], 179)
+        self.assertEqual(r["source"], "body")
+
+    def test_body_ignores_far_prices_of_other_products(self):
+        filler = "가" * 600
+        body = "비링크 SER8 $150\n" + filler + "\nGMKtec K12 가격은 $259"
+        r = monitor.analyze("[알리] 미니PC 모음", body)
+        self.assertAlmostEqual(r["price"], 259)
+
+    def test_coupon_amount_not_price(self):
+        r = monitor.analyze("GMKtec K12 (US $239.00/무료)", "$30 할인 쿠폰")
+        self.assertAlmostEqual(r["price"], 239)
+
+    def test_krw(self):
+        r = monitor.analyze("[알리] GMKtec K12 (259,000원/무료)", "")
+        self.assertAlmostEqual(r["price"], round(259000 / monitor.KRW_PER_USD, 2))
+
+    def test_unrelated(self):
+        self.assertIsNone(monitor.analyze("[알리] 기계식 키보드 ($45)", "k120 아님"))
+        self.assertIsNone(monitor.analyze("[알리] 로지텍 K120 키보드 ($12)", ""))
+
+    def test_list_ids(self):
+        page = ('<a href="bbs_view.php?id=ppomppu8&amp;no=12345&amp;page=1">a</a>'
+                '<a href="/new/bbs_view.php?id=ppomppu&no=999">b</a>'
+                '<a href="bbs_view.php?id=ppomppu8&no=12346">c</a>')
+        self.assertEqual(monitor.list_post_ids(page), ["12345", "12346"])
+
+
+if __name__ == "__main__":
+    unittest.main()
