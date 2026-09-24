@@ -9,15 +9,29 @@ jobs:
     steps:
       - name: Try ppomppu URLs
         run: |
-          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
           for u in \
-            "https://m.ppomppu.co.kr/new/bbs_list.php?id=ppomppu8" \
-            "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu8" \
-            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8"; do
+            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250" \
+            "http://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250" \
+            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu8&no=100250" \
+            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8&page=2" \
+            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8&keyword=K12&search_type=sub_memo" \
+            "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu8&search_type=sub_memo&keyword=K12" \
+            "https://www.ppomppu.co.kr/search_bbs.php?keyword=K12" ; do
             echo "=== $u"
-            curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -H 'Accept-Language: ko-KR,ko;q=0.9' \
-              -o /tmp/out -w 'status=%{http_code} final=%{url_effective} redirects=%{num_redirects}\n' "$u" || true
-            curl -sS -D - -o /dev/null -A "$UA" "$u" | head -15 || true
-            head -c 800 /tmp/out | iconv -f cp949 -t utf-8 -c; echo
+            curl -sS -A "$UA" -o /tmp/out -w 'status=%{http_code} size=%{size_download}\n' "$u" || true
+            grep -o '<item>' /tmp/out | wc -l
+            grep -o 'no=[0-9]*' /tmp/out | sort -u | head -5 | tr '\n' ' '; echo
           done
-          curl -sS https://ipinfo.io/json || true
+          echo "=== RSS item count / first item full"
+          curl -sS -A "$UA" "https://www.ppomppu.co.kr/rss.php?id=ppomppu8" -o /tmp/rss.xml
+          grep -o '<item>' /tmp/rss.xml | wc -l
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          items = ET.parse('/tmp/rss.xml').getroot().findall('./channel/item')
+          for it in items[:3]:
+              for c in it:
+                  print(c.tag, '=>', (c.text or '')[:1500].replace('\n', ' '))
+              print('---')
+          print('pubDates:', [it.findtext('pubDate') for it in items][:1], '...', [it.findtext('pubDate') for it in items][-1:])
+          PY
