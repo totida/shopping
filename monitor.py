@@ -251,7 +251,12 @@ def analyze(title, body, product, mentioned=False):
         return None
 
     anchors = [product["anchor"]]
-    if product["price_anchor"] is not None and not product["anchor"].search(title):
+    # 제목에 이 모델 표기가 없을 때만 "FIREBAT F1" 로 가격을 찾는다.
+    # 제목에 다른 모델(예: F1 H255)만 적혀 있으면 그 F1 은 다른 모델이므로 쓰지 않는다.
+    other_variant_in_title = any(
+        p["anchor"].search(title) for p in PRODUCTS
+        if p is not product and p["price_anchor"] is not None)
+    if product["price_anchor"] is not None and not product["anchor"].search(title) and not other_variant_in_title:
         anchors.append(product["price_anchor"])
     for anchor in anchors:
         best, off = title_price(title, anchor, product)

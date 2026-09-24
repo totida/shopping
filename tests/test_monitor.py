@@ -119,6 +119,12 @@ class AnalyzeTest(unittest.TestCase):
         self.assertAlmostEqual(analyze("FIREBAT F1 미니 PC AMD Ryzen 7 H255 (471,954원/무료)", "", F1_H255)["price"],
                                round(471954 / monitor.KRW_PER_USD, 2))
 
+    def test_alias_not_used_when_title_names_other_variant(self):
+        post = {"no": "3", "title": "[미니PC] FIREBAT R3 7430U($216), F1 H255 ($340)/무료",
+                "body": "FIREBAT F1 미니 PC 판매가 $361.15", "hits": {"firebat-f1-7640hs", "firebat-f1-h255"}}
+        got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
+        self.assertEqual(got, {"firebat-f1-h255": 340, "firebat-f1-7640hs": None})
+
 
 if __name__ == "__main__":
     unittest.main()
