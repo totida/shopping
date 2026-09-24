@@ -1,0 +1,23 @@
+name: Connectivity probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try ppomppu URLs
+        run: |
+          UA='Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1'
+          for u in \
+            "https://m.ppomppu.co.kr/new/bbs_list.php?id=ppomppu8" \
+            "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu8" \
+            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8"; do
+            echo "=== $u"
+            curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -H 'Accept-Language: ko-KR,ko;q=0.9' \
+              -o /tmp/out -w 'status=%{http_code} final=%{url_effective} redirects=%{num_redirects}\n' "$u" || true
+            curl -sS -D - -o /dev/null -A "$UA" "$u" | head -15 || true
+            head -c 800 /tmp/out | iconv -f cp949 -t utf-8 -c; echo
+          done
+          curl -sS https://ipinfo.io/json || true

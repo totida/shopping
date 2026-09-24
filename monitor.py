@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -40,18 +41,30 @@ KST = timezone(timedelta(hours=9))
 # ---------------------------------------------------------------- fetching
 
 
+import http.cookiejar  # noqa: E402
+
+# 뽐뿌는 첫 요청에 쿠키를 심고 302 로 되돌려 보내므로 쿠키를 유지해야 한다.
+_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+
 def fetch(url):
     req = urllib.request.Request(
         url,
         headers={
             "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "ko-KR,ko;q=0.9",
             "Referer": BASE + "bbs_list.php?id=" + BOARD_ID,
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
-        charset = resp.headers.get_content_charset()
+    try:
+        with _opener.open(req, timeout=30) as resp:
+            raw = resp.read()
+            charset = resp.headers.get_content_charset()
+    except urllib.error.HTTPError as e:
+        snippet = e.read()[:500].decode("cp949", errors="replace")
+        print(f"HTTP {e.code} {e.url}\n{snippet}")
+        raise
     if not charset:
         m = re.search(rb'charset=["\']?([\w-]+)', raw[:3000], re.I)
         charset = m.group(1).decode() if m else "cp949"
