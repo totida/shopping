@@ -10,28 +10,23 @@ jobs:
       - name: Try ppomppu URLs
         run: |
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
-          for u in \
-            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250" \
-            "http://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250" \
-            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu8&no=100250" \
-            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8&page=2" \
-            "https://www.ppomppu.co.kr/rss.php?id=ppomppu8&keyword=K12&search_type=sub_memo" \
-            "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu8&search_type=sub_memo&keyword=K12" \
-            "https://www.ppomppu.co.kr/search_bbs.php?keyword=K12" ; do
+          show() { iconv -f cp949 -t utf-8 -c "$1" 2>/dev/null || cat "$1"; }
+          echo "=== http view raw"
+          curl -sS -A "$UA" -i "http://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250" | head -30
+          echo "=== http view follow + cookies"
+          curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -o /tmp/v -w 'status=%{http_code} final=%{url_effective} size=%{size_download}\n' "http://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=100250"
+          show /tmp/v | head -c 600; echo
+          for u in "http://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu8&no=100250" "http://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu8" "http://m.ppomppu.co.kr/new/bbs_list.php?id=ppomppu8"; do
             echo "=== $u"
-            curl -sS -A "$UA" -o /tmp/out -w 'status=%{http_code} size=%{size_download}\n' "$u" || true
-            grep -o '<item>' /tmp/out | wc -l
-            grep -o 'no=[0-9]*' /tmp/out | sort -u | head -5 | tr '\n' ' '; echo
+            curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -o /tmp/o -w 'status=%{http_code} final=%{url_effective} size=%{size_download}\n' "$u"
           done
-          echo "=== RSS item count / first item full"
-          curl -sS -A "$UA" "https://www.ppomppu.co.kr/rss.php?id=ppomppu8" -o /tmp/rss.xml
-          grep -o '<item>' /tmp/rss.xml | wc -l
+          echo "=== search_bbs"
+          curl -sS -A "$UA" -o /tmp/s -w 'status=%{http_code} size=%{size_download}\n' "https://www.ppomppu.co.kr/search_bbs.php?search_type=sub_memo&page_no=1&keyword=K12&page_size=50&bbs_id=ppomppu8&order_type=date"
+          show /tmp/s > /tmp/s8
+          grep -o 'id=ppomppu8[^"]*' /tmp/s8 | head -10
+          grep -c 'ppomppu8' /tmp/s8
           python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          items = ET.parse('/tmp/rss.xml').getroot().findall('./channel/item')
-          for it in items[:3]:
-              for c in it:
-                  print(c.tag, '=>', (c.text or '')[:1500].replace('\n', ' '))
-              print('---')
-          print('pubDates:', [it.findtext('pubDate') for it in items][:1], '...', [it.findtext('pubDate') for it in items][-1:])
+          t = open('/tmp/s8', encoding='utf-8', errors='replace').read()
+          i = t.find('ppomppu8&')
+          print(t[max(0, i - 1500): i + 2500] if i >= 0 else t[:3000])
           PY

@@ -23,6 +23,9 @@ BOARD_ID = "ppomppu8"
 BASE = "https://m.ppomppu.co.kr/new/"
 LIST_URL = BASE + "bbs_list.php?id={board}&page={page}"
 VIEW_URL = BASE + "bbs_view.php?id={board}&no={no}"
+# 해외(GitHub 서버) IP 에서는 게시판 페이지가 403 으로 막히지만 RSS 는 열려 있다.
+# RSS 에는 제목과 본문(description)이 모두 들어 있다.
+RSS_URL = "https://www.ppomppu.co.kr/rss.php?id={board}"
 
 THRESHOLD_USD = float(os.environ.get("THRESHOLD_USD", "200"))
 KRW_PER_USD = float(os.environ.get("KRW_PER_USD", "1400"))
@@ -269,7 +272,7 @@ def append_history(rows):
         return []
     write_header = not os.path.exists(HISTORY_FILE)
     with open(HISTORY_FILE, "a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["checked_at_kst", "product", "post_no", "price_usd", "price_text", "title", "url"])
+        w = csv.DictWriter(f, fieldnames=["checked_at_kst", "posted_at_kst", "product", "post_no", "price_usd", "price_text", "title", "url"])
         if write_header:
             w.writeheader()
         w.writerows(new)
@@ -331,19 +334,41 @@ def notify(hit):
 # ---------------------------------------------------------------- main
 
 
-def main():
+def rss_posts():
+    """RSS 에서 [{no, title, body, date, url}] 를 얻는다."""
+    import xml.etree.ElementTree as ET
+    from email.utils import parsedate_to_datetime
+
+    root = ET.fromstring(fetch(RSS_URL.format(board=BOARD_ID)).encode("utf-8"))
+    out = []
+    for it in root.findall("./channel/item"):
+        link = html.unescape(it.findtext("link") or "")
+        m = re.search(r"[?&]no=(\d+)", link)
+        if not m:
+            continue
+        date = ""
+        if it.findtext("pubDate"):
+            try:
+                date = parsedate_to_datetime(it.findtext("pubDate")).astimezone(KST).strftime("%Y-%m-%d %H:%M")
+            except (TypeError, ValueError):
+                pass
+        out.append({
+            "no": m.group(1),
+            "title": html_to_text(it.findtext("title") or ""),
+            "body": html_to_text(html.unescape(it.findtext("description") or "")),
+            "date": date,
+            "url": VIEW_URL.format(board=BOARD_ID, no=m.group(1)),
+        })
+    return out
+
+
+def page_posts():
+    """게시판 페이지를 직접 읽는다 (국내 IP 등 페이지 접근이 되는 환경용)."""
     ids = []
     for page in range(1, PAGES + 1):
-        page_html = fetch(LIST_URL.format(board=BOARD_ID, page=page))
-        found = list_post_ids(page_html)
+        found = list_post_ids(fetch(LIST_URL.format(board=BOARD_ID, page=page)))
         print(f"list page {page}: {len(found)} posts")
         ids += [i for i in found if i not in ids]
-    if not ids:
-        print("ERROR: 목록에서 글을 하나도 찾지 못했습니다 (차단 또는 페이지 구조 변경).")
-        return 1
-
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    rows, hits = [], []
     for no in ids:
         url = VIEW_URL.format(board=BOARD_ID, no=no)
         try:
@@ -352,19 +377,35 @@ def main():
             print(f"skip {no}: {e}")
             continue
         time.sleep(1)
-        title, body = extract_title(page_html), extract_body(page_html)
+        yield {"no": no, "title": extract_title(page_html), "body": extract_body(page_html),
+               "date": "", "url": url}
+
+
+def main():
+    try:
+        posts = rss_posts()
+        print(f"rss: {len(posts)} posts")
+    except Exception as e:
+        print(f"rss failed ({e}), falling back to board pages")
+        posts = page_posts()
+
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    rows, hits, count = [], [], 0
+    for post in posts:
+        count += 1
+        no, title, body, url = post["no"], post["title"], post["body"], post["url"]
         for product in PRODUCTS:
             res = analyze(title, body, product)
             if not res:
                 continue
             print(f"{product['name']} post {no}: price={res['price']} ({res['price_text']}) {title}")
             price = "" if res["price"] is None else f"{res['price']:.2f}"
-            rows.append({"checked_at_kst": now, "product": product["key"], "post_no": no,
+            rows.append({"checked_at_kst": now, "posted_at_kst": post["date"], "product": product["key"], "post_no": no,
                          "price_usd": price, "price_text": res["price_text"], "title": title, "url": url})
             if product["alert"] and res["price"] is not None and res["price"] < THRESHOLD_USD:
                 hits.append({**res, "post_no": no, "title": title, "url": url})
 
-    print(f"checked {len(ids)} posts, product posts: {len(rows)}, K12 under ${THRESHOLD_USD:.0f}: {len(hits)}")
+    print(f"checked {count} posts, product posts: {len(rows)}, K12 under ${THRESHOLD_USD:.0f}: {len(hits)}")
     for r in append_history(rows):
         print("history +", r["post_no"], r["price_usd"])
     for h in hits:
