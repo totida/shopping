@@ -102,6 +102,23 @@ class AnalyzeTest(unittest.TestCase):
         self.assertAlmostEqual(analyze(title, "", F1_H255)["price"], 340)
         self.assertIsNone(analyze(title, "", F1_7640))
 
+    def test_ambiguous_f1_goes_to_generic(self):
+        post = {"no": "1", "title": "[미니PC특가] GMKtec G3S($116) FIREBAT F1($254) GMKtec M8($200)",
+                "body": "", "hits": {"firebat-f1-7640hs", "firebat-f1-h255"}}
+        got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
+        self.assertEqual(got, {"firebat-f1": 254})
+
+    def test_alias_ignores_other_variant(self):
+        post = {"no": "2", "title": "[특가마지막날] GMKtec M6 7640HS ($164), FIREBAT F1 7640HS ($312)",
+                "body": "", "hits": {"firebat-f1-7640hs", "firebat-f1-h255"}}
+        got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
+        self.assertEqual(got, {"firebat-f1-7640hs": 312, "firebat-f1-h255": None})
+
+    def test_ryzen_variant_names(self):
+        self.assertAlmostEqual(analyze("FIREBAT F1 미니 PC AMD Ryzen 5 ($192)무배", "", F1_7640)["price"], 192)
+        self.assertAlmostEqual(analyze("FIREBAT F1 미니 PC AMD Ryzen 7 H255 (471,954원/무료)", "", F1_H255)["price"],
+                               round(471954 / monitor.KRW_PER_USD, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

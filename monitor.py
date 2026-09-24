@@ -113,7 +113,13 @@ def _rx(p):
 
 
 FIREBAT_RE = _rx(r"firebat|파이어\s?뱃")
-F1_RE = _rx(r"(?:firebat|파이어\s?뱃)\s*f1(?![0-9])")
+# 세부 모델 표기: 7640HS 는 Ryzen 5, H255 는 Ryzen 7
+V7640 = r"(?:7640\s?hs|ryzen\s?5|r5(?![0-9]))"
+VH255 = r"(?:h\s?255(?![0-9])|ryzen\s?7|r7(?![0-9]))"
+F1 = r"(?<![a-z0-9])f1(?![0-9])"
+# 모델 표기가 붙지 않은 "FIREBAT F1" (뒤에 7640HS/H255 등이 오면 제외)
+F1_RE = _rx(r"(?:firebat|파이어\s?뱃)\s*f1(?![0-9])(?![^$()\n,/]{0,40}?(?:" + V7640 + "|" + VH255 + "))")
+
 
 # 감시 대상 상품.
 #   anchor : 가격 위치를 찾는 기준이 되는 상품명
@@ -131,12 +137,12 @@ PRODUCTS = [
     {
         "key": "firebat-f1-7640hs", "name": "FIREBAT F1 7640HS",
         # "GMKtec M6 7640HS" 같은 다른 7640HS 제품과 구분하려고 F1 바로 뒤의 7640HS 만 인정
-        "anchor": _rx(r"(?<![a-z0-9])f1(?![0-9])[^$()\n,/]{0,25}?7640\s?hs"), "search": ["7640HS"],
+        "anchor": _rx(F1 + r"[^$()\n,/]{0,40}?" + V7640), "search": ["7640HS"],
         "match": [FIREBAT_RE], "price_anchor": F1_RE, "alert": False,
     },
     {
         "key": "firebat-f1-h255", "name": "FIREBAT F1 H255",
-        "anchor": _rx(r"(?<![a-z0-9])f1(?![0-9])[^$()\n,/]{0,40}?h\s?255(?![0-9])"), "search": ["H255"],
+        "anchor": _rx(F1 + r"[^$()\n,/]{0,40}?" + VH255), "search": ["H255"],
         "match": [FIREBAT_RE], "price_anchor": F1_RE, "alert": False,
     },
     {
@@ -250,18 +256,18 @@ def analyze(title, body, product, mentioned=False):
     for anchor in anchors:
         best, off = title_price(title, anchor, product)
         if best:
-            return _result(best, "title", title, off)
+            return _result(best, "title", title, off, anchor is not product["anchor"])
     for anchor in anchors:
         best = body_price(body, anchor, product)
         if best:
-            return _result(best, "body", body, 0)
-    return {"price": None, "price_text": "", "source": "none", "context": ""}
+            return _result(best, "body", body, 0, anchor is not product["anchor"])
+    return {"price": None, "price_text": "", "source": "none", "context": "", "alias": False}
 
 
-def _result(best, source, src, off):
+def _result(best, source, src, off, alias=False):
     pos = best[2] + off
     ctx = src[max(0, pos - 120): pos + 120].replace("\n", " ")
-    return {"price": best[0], "price_text": best[1], "source": source, "context": ctx}
+    return {"price": best[0], "price_text": best[1], "source": source, "context": ctx, "alias": alias}
 
 
 def analyze_post(post):
@@ -274,6 +280,16 @@ def analyze_post(post):
         res = analyze(post["title"], post["body"], product, mentioned)
         if res:
             results[product["key"]] = (product, res)
+    # 제목에 모델 없이 "FIREBAT F1($254)" 만 있고 본문에 두 모델이 다 나오면 어느 모델 가격인지 알 수 없다
+    # → 두 모델 모두에서 빼고 '모델 미표기' 로 기록
+    alias_keys = [k for k, (p, r) in results.items() if r.get("alias") and p.get("price_anchor") is not None]
+    if len(alias_keys) >= 2:
+        for k in alias_keys:
+            del results[k]
+        generic = next(p for p in PRODUCTS if p.get("fallback_for"))
+        res = analyze(post["title"], post["body"], generic, True)
+        if res:
+            results[generic["key"]] = (generic, res)
     return list(results.values())
 
 
