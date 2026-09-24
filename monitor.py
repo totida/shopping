@@ -1,8 +1,8 @@
-"""뽐뿌 해외뽐뿌(ppomppu8) 게시판에서 GMKtec K12 가격을 감시한다.
+"""뽐뿌 해외뽐뿌(ppomppu8) 게시판에서 GMKtec K12 (알림) 와 FIREBAT F1 7640HS·H255 (기록만) 가격을 감시한다.
 
 - 게시판 목록의 모든 글을 열어 제목 + 본문을 함께 검사한다.
-- K12 관련 글이면 가격을 뽑아 data/price_history.csv 에 기록한다 (가격 모니터링).
-- 가격이 기준가(기본 $200) 미만이면 GitHub 이슈로 알린다 (선택: 텔레그램).
+- 감시 상품 글이면 가격을 뽑아 data/price_history.csv 에 기록한다 (가격 모니터링).
+- K12 가격이 기준가(기본 $200) 미만이면 GitHub 이슈로 알린다 (선택: 텔레그램).
 
 외부 의존성 없이 표준 라이브러리만 사용한다.
 """
@@ -111,8 +111,35 @@ def extract_body(page_html):
     return html_to_text(page_html)
 
 
-K12_RE = re.compile(r"(?<![a-z0-9])k[\s-]?12(?![0-9])", re.I)
-BRAND_RE = re.compile(r"gmk\s?tec|gmk(?![a-z])|지엠케이|nucbox|누크박스|미니\s?pc|mini\s?pc", re.I)
+def _rx(p):
+    return re.compile(p, re.I)
+
+
+# 감시 대상 상품. match 의 정규식이 모두 (제목+본문 기준) 나와야 해당 상품 글로 본다.
+# alert=True 인 상품만 기준가 미만일 때 알림, 나머지는 가격 기록만 한다.
+PRODUCTS = [
+    {
+        "key": "gmktec-k12",
+        "name": "GMKtec K12",
+        "anchor": _rx(r"(?<![a-z0-9])k[\s-]?12(?![0-9])"),
+        "match": [_rx(r"gmk\s?tec|gmk(?![a-z])|지엠케이|nucbox|누크박스|미니\s?pc|mini\s?pc")],
+        "alert": True,
+    },
+    {
+        "key": "firebat-f1-7640hs",
+        "name": "FIREBAT F1 7640HS",
+        "anchor": _rx(r"7640\s?hs"),
+        "match": [_rx(r"firebat|파이어\s?뱃"), _rx(r"(?<![a-z0-9])f1(?![0-9])")],
+        "alert": False,
+    },
+    {
+        "key": "firebat-f1-h255",
+        "name": "FIREBAT F1 H255",
+        "anchor": _rx(r"(?<![a-z0-9])h\s?255(?![0-9])"),
+        "match": [_rx(r"firebat|파이어\s?뱃"), _rx(r"(?<![a-z0-9])f1(?![0-9])")],
+        "alert": False,
+    },
+]
 
 NUM = r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?"
 USD_PATTERNS = [
@@ -124,6 +151,11 @@ KRW_PATTERNS = [
     re.compile(r"(\d{1,3}(?:\.\d{1,2})?)\s?만\s?원"),
     re.compile(r"₩\s?(\d{1,3}(?:,\d{3})+|\d{5,7})"),
 ]
+# "할인가 $254.32", "최저가: $304.91" → 최종 가격
+FINAL_LABEL = _rx(r"(할인가|최저가|최종가|실구매가|실결제가|결제가|구매가|최종|적용가|막차가)\s*[:：]?\s*[^\n\d$]{0,6}$")
+# "카드할인 $100", "할인코드 $36", "결제 할인 $100" → 할인 금액이지 가격이 아님
+DISCOUNT_LABEL = _rx(r"(할인|쿠폰|코드|코인|적립|캐시백|페이백|coupon|off)[^\n]{0,4}$")
+DISCOUNT_SUFFIX = _rx(r"^\s*(할인|off|쿠폰|적립|캐시백)")
 
 
 def _num(whole, frac=None):
@@ -134,43 +166,77 @@ def _num(whole, frac=None):
 
 
 def find_prices(text):
-    """(usd_value, 원문표기) 목록. 원화는 KRW_PER_USD 로 환산."""
-    out = []
+    """[(usd, 원문표기, 위치, 종류)] — 종류: final / plain. 할인 금액은 제외. 원화는 환산."""
+    raw = []
     for p in USD_PATTERNS:
         for m in p.finditer(text):
-            out.append((_num(m.group(1), m.group(2)), m.group(0).strip(), m.start()))
+            raw.append((_num(m.group(1), m.group(2)), m))
     for i, p in enumerate(KRW_PATTERNS):
         for m in p.finditer(text):
             krw = float(m.group(1)) * 10000 if i == 1 else _num(m.group(1))
-            out.append((round(krw / KRW_PER_USD, 2), m.group(0).strip(), m.start()))
-    return [(v, s, pos) for v, s, pos in out if v >= MIN_PLAUSIBLE_USD and v < 5000]
+            raw.append((round(krw / KRW_PER_USD, 2), m))
+    out, seen = [], set()
+    for v, m in sorted(raw, key=lambda x: x[1].start()):
+        if m.start() in seen or not (MIN_PLAUSIBLE_USD <= v < 5000):
+            continue
+        seen.add(m.start())
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        prefix = text[max(line_start, m.start() - 15): m.start()]
+        if FINAL_LABEL.search(prefix):
+            kind = "final"
+        elif DISCOUNT_LABEL.search(prefix) or DISCOUNT_SUFFIX.search(text[m.end(): m.end() + 8]):
+            continue
+        else:
+            kind = "plain"
+        out.append((v, m.group(0).strip(), m.start(), kind))
+    return out
 
 
-def analyze(title, body):
-    """K12 글이면 dict 반환, 아니면 None."""
+def pick_price(prices):
+    """'할인가/최저가' 로 표시된 가격이 있으면 그중 최저, 없으면 전체 최저."""
+    finals = [p for p in prices if p[3] == "final"]
+    return min(finals or prices, key=lambda p: p[0]) if prices else None
+
+
+def product_segments(text, product):
+    """본문에서 해당 상품 이름 뒤 ~ 다른 상품 이름 전까지 구간 (여러 상품 모음글 대비)."""
+    others = [p["anchor"] for p in PRODUCTS if p is not product]
+    segs = []
+    for m in product["anchor"].finditer(text):
+        end = min(len(text), m.end() + 800)
+        for o in others:
+            om = o.search(text, m.end(), end)
+            if om:
+                end = min(end, om.start())
+        segs.append((m.start(), end))
+    return segs
+
+
+def analyze(title, body, product):
+    """해당 상품 글이면 dict 반환, 아니면 None."""
     full = title + "\n" + body
-    if not K12_RE.search(full):
+    if not product["anchor"].search(full):
         return None
-    if not (BRAND_RE.search(full) or K12_RE.search(title)):
-        return None  # 'K12' 만 우연히 나온 다른 상품 글 제외
+    if not all(r.search(full) for r in product["match"]):
+        return None
 
-    # 1순위: 제목에 적힌 가격 (뽐뿌 제목은 보통 "(가격/배송비)" 형식)
-    prices = find_prices(title) if K12_RE.search(title) else []
-    source = "title"
-    if not prices:
-        # 2순위: 본문에서 K12 언급 근처(±400자)의 가격 — 여러 상품 모음글 대비
-        near = []
-        for km in K12_RE.finditer(body):
-            lo, hi = max(0, km.start() - 400), km.end() + 400
-            near += [p for p in find_prices(body) if lo <= p[2] <= hi]
-        prices = near or (find_prices(body) if K12_RE.search(title) else [])
-        source = "body"
-    if not prices:
+    in_title = bool(product["anchor"].search(title))
+    # 1순위: 제목 가격 (뽐뿌 제목은 보통 "(가격/배송비)" 형식). 제목에 다른 상품도 있으면 건너뜀.
+    title_has_other = any(p["anchor"].search(title) for p in PRODUCTS if p is not product)
+    best, source, src = None, "none", ""
+    if in_title and not title_has_other:
+        best, source, src = pick_price(find_prices(title)), "title", title
+    if not best:
+        # 2순위: 본문에서 상품 이름 근처 구간
+        prices = [p for lo, hi in product_segments(body, product)
+                  for p in find_prices(body[lo:hi])
+                  for p in [(p[0], p[1], p[2] + lo, p[3])]]
+        if not prices and in_title and not title_has_other:
+            prices = find_prices(body)  # 단일 상품 글: 본문 전체
+        best, source, src = pick_price(prices), "body", body
+    if not best:
         return {"price": None, "price_text": "", "source": "none", "context": ""}
-
-    best = min(prices, key=lambda p: p[0])
-    ctx_src = title if source == "title" else body
-    ctx = ctx_src[max(0, best[2] - 120): best[2] + 120].replace("\n", " ")
+    ctx = src[max(0, best[2] - 120): best[2] + 120].replace("\n", " ")
     return {"price": best[0], "price_text": best[1], "source": source, "context": ctx}
 
 
@@ -184,13 +250,13 @@ def append_history(rows):
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                last[r["post_no"]] = r["price_usd"]
-    new = [r for r in rows if last.get(r["post_no"]) != r["price_usd"]]
+                last[(r.get("product", "gmktec-k12"), r["post_no"])] = r["price_usd"]
+    new = [r for r in rows if last.get((r["product"], r["post_no"])) != r["price_usd"]]
     if not new:
         return []
     write_header = not os.path.exists(HISTORY_FILE)
     with open(HISTORY_FILE, "a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["checked_at_kst", "post_no", "price_usd", "price_text", "title", "url"])
+        w = csv.DictWriter(f, fieldnames=["checked_at_kst", "product", "post_no", "price_usd", "price_text", "title", "url"])
         if write_header:
             w.writeheader()
         w.writerows(new)
@@ -274,17 +340,18 @@ def main():
             continue
         time.sleep(1)
         title, body = extract_title(page_html), extract_body(page_html)
-        res = analyze(title, body)
-        if not res:
-            continue
-        print(f"K12 post {no}: price={res['price']} ({res['price_text']}) {title}")
-        price = "" if res["price"] is None else f"{res['price']:.2f}"
-        rows.append({"checked_at_kst": now, "post_no": no, "price_usd": price,
-                     "price_text": res["price_text"], "title": title, "url": url})
-        if res["price"] is not None and res["price"] < THRESHOLD_USD:
-            hits.append({**res, "post_no": no, "title": title, "url": url})
+        for product in PRODUCTS:
+            res = analyze(title, body, product)
+            if not res:
+                continue
+            print(f"{product['name']} post {no}: price={res['price']} ({res['price_text']}) {title}")
+            price = "" if res["price"] is None else f"{res['price']:.2f}"
+            rows.append({"checked_at_kst": now, "product": product["key"], "post_no": no,
+                         "price_usd": price, "price_text": res["price_text"], "title": title, "url": url})
+            if product["alert"] and res["price"] is not None and res["price"] < THRESHOLD_USD:
+                hits.append({**res, "post_no": no, "title": title, "url": url})
 
-    print(f"checked {len(ids)} posts, K12 posts: {len(rows)}, under ${THRESHOLD_USD:.0f}: {len(hits)}")
+    print(f"checked {len(ids)} posts, product posts: {len(rows)}, K12 under ${THRESHOLD_USD:.0f}: {len(hits)}")
     for r in append_history(rows):
         print("history +", r["post_no"], r["price_usd"])
     for h in hits:
