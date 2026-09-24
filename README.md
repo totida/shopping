@@ -1,19 +1,24 @@
-# GMKtec K12 가격 감시
+# 뽐뿌 미니PC 가격 감시
 
 뽐뿌 해외뽐뿌 게시판(`ppomppu8`)을 30분마다 확인합니다 (GitHub Actions).
 
-- 목록 1~2페이지의 **모든 글을 열어 제목과 본문을 함께** 검사합니다.
-- K12 와 FIREBAT F1 (7640HS, H255) 글이면 가격을 `data/price_history.csv` 에 기록합니다 (가격 추이).
-- K12 가격이 **$200 미만**이면 `price-alert` 라벨로 이슈를 만듭니다 → GitHub 알림/메일로 전달됩니다.
-- 원화 표기는 1 USD = 1400원으로 환산합니다 (`KRW_PER_USD` 로 변경).
-- 텔레그램 알림도 받고 싶다면 저장소 Secrets 에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 를 추가하세요.
+| 상품 | 동작 |
+| --- | --- |
+| GMKtec K12 | **$200 미만**이면 `price-alert` 이슈로 알림 + 가격 기록 |
+| FIREBAT F1 7640HS | 가격 기록만 |
+| FIREBAT F1 H255 | 가격 기록만 |
 
-수동 실행: Actions 탭 → *GMKtec K12 price monitor* → Run workflow.
+## 동작 방식
+- GitHub 서버(해외 IP)에서는 뽐뿌 게시판·글 페이지가 403 으로 막혀 있어, 뽐뿌 **통합검색(제목+내용)** 을 사용합니다.
+  검색이 본문까지 보기 때문에 본문에만 상품명이 적힌 글도 찾습니다.
+- 가격은 제목의 `상품명($가격)` 표기를 우선, 없으면 검색결과에 보이는 본문 앞부분에서 뽑습니다.
+  `카드할인 $100`, `할인코드 $36` 같은 할인액은 가격으로 보지 않고 `할인가`/`최저가` 표기를 우선합니다.
+- 본문 뒤쪽에만 가격이 있으면 가격을 알 수 없어 빈 값으로 기록됩니다 (전체 본문은 해외 IP 에서 열 수 없음).
+- 원화 표기는 1 USD = 1400원으로 환산합니다 (`KRW_PER_USD`).
+- 기록: `data/price_history.csv` (게시일, 상품, 가격, 글 링크)
+- 텔레그램 알림도 받으려면 저장소 Secrets 에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 추가.
+
+## 과거 가격 수집
+Actions → *Price history backfill* → Run workflow (기본: 2026-01-01 이후).
+
 테스트: `python -m unittest discover -s tests`
-
-FIREBAT F1 7640HS / H255 는 알림 없이 가격만 기록합니다.
-본문에 `카드할인 $100`, `할인코드 $36` 처럼 할인액이 함께 적힌 경우 `할인가`/`최저가` 표기를 우선합니다.
-
-## 올해 가격 추이 (backfill)
-Actions → *Price history backfill* → Run workflow. 게시판을 제목+내용으로 검색해
-`data/backfill.csv` 에 올해 1월 1일 이후 글의 가격을 모읍니다.

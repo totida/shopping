@@ -6,9 +6,10 @@ on:
       since:
         description: "이 날짜 이후 글만 (YYYY-MM-DD)"
         default: "2026-01-01"
-      debug:
-        description: "페이지 샘플을 로그에 출력 (1)"
-        default: "1"
+
+concurrency:
+  group: k12-monitor
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -25,8 +26,7 @@ jobs:
       - name: Search board and collect prices
         env:
           SINCE: ${{ inputs.since }}
-          DEBUG: ${{ inputs.debug }}
-        run: python backfill.py
+        run: python monitor.py
       - name: Commit
         run: |
           if [ -n "$(git status --porcelain data/)" ]; then

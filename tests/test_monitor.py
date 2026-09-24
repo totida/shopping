@@ -5,7 +5,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import monitor  # noqa: E402
 
-K12, F1_7640, F1_H255 = monitor.PRODUCTS
+K12, F1_7640, F1_H255, F1_ANY = monitor.PRODUCTS
 
 
 def analyze(title, body, product=K12):
@@ -60,11 +60,38 @@ class AnalyzeTest(unittest.TestCase):
         self.assertAlmostEqual(analyze("[알리] 미니PC 모음", body, F1_H255)["price"], 304.91)
         self.assertIsNone(analyze("[알리] 미니PC 모음", body, K12))
 
-    def test_list_ids(self):
-        page = ('<a href="bbs_view.php?id=ppomppu8&amp;no=12345&amp;page=1">a</a>'
-                '<a href="/new/bbs_view.php?id=ppomppu&no=999">b</a>'
-                '<a href="bbs_view.php?id=ppomppu8&no=12346">c</a>')
-        self.assertEqual(monitor.list_post_ids(page), ["12345", "12346"])
+    def test_parse_search_and_title_prices(self):
+        page = (
+            '<div class="results_board"><div class="conts">\n'
+            "<a href='https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu8&no=99347&keyword=K12'>"
+            "<div class='thumb'></div></a> <div class=\"content\">\n"
+            "<span class=\"title\"><a href=/zboard/view.php?id=ppomppu8&no=99347&keyword=K12>"
+            "[미니PC특가] GMKtec G3S($116) FIREBAT F1($254) GMKtec M8($200)"
+            "<font class='comment-cnt'>0</font></a></span>\n"
+            "<p style=\"height:45px\"><a href=/zboard/view.php?id=ppomppu8&no=99347&keyword=K12>"
+            "GMKtec G3S 미니 PC 상세페이지 가격: $159.57코드할인 $15 &lt; SRMG15 &gt;최저가: $116.38&nbsp;</a></p>\n"
+            "<p class=\"desc\"><span>[알리뽐뿌]</span><span>조회수: 614</span> | <span>2026.09.15</span> |</p>"
+            "</div></div>"
+        )
+        posts = monitor.parse_search(page)
+        self.assertEqual(len(posts), 1)
+        post = posts[0]
+        self.assertEqual((post["no"], post["date"]), ("99347", "2026-09-15"))
+        self.assertTrue(post["title"].startswith("[미니PC특가] GMKtec G3S($116)"))
+
+        # 검색 '7640HS' 에 걸림 → 제목의 "FIREBAT F1($254)" 가 7640HS 가격
+        post["hits"] = {"firebat-f1-7640hs", "gmktec-k12"}
+        got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
+        self.assertEqual(got, {"firebat-f1-7640hs": 254, "gmktec-k12": None})
+
+        # 세부 모델 검색에 안 걸리면 모델 미표기 F1 으로 기록
+        post["hits"] = {"firebat-f1"}
+        got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
+        self.assertEqual(got, {"firebat-f1": 254})
+
+    def test_title_first_price_after_name(self):
+        r = analyze("[알리] GMKtec K12($189) GMKtec M8($150) /무료", "")
+        self.assertAlmostEqual(r["price"], 189)
 
 
 if __name__ == "__main__":

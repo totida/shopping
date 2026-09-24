@@ -1,14 +1,18 @@
-"""뽐뿌 해외뽐뿌(ppomppu8) 게시판에서 GMKtec K12 (알림) 와 FIREBAT F1 7640HS·H255 (기록만) 가격을 감시한다.
+"""뽐뿌 해외뽐뿌(ppomppu8) 에서 GMKtec K12 (알림) 와 FIREBAT F1 7640HS·H255 (기록만) 가격을 감시한다.
 
-- 게시판 목록의 모든 글을 열어 제목 + 본문을 함께 검사한다.
-- 감시 상품 글이면 가격을 뽑아 data/price_history.csv 에 기록한다 (가격 모니터링).
+해외(GitHub 서버) IP 에서는 게시판·글 페이지가 403 으로 막혀 있어 뽐뿌 통합검색을 쓴다.
+- 통합검색(제목+내용)으로 상품명이 언급된 글을 찾는다 → 본문에만 적힌 경우도 잡힌다.
+- 가격은 제목의 "상품명($가격)" 표기를 우선, 없으면 검색결과에 보이는 본문 앞부분에서 뽑는다.
+- 결과는 data/price_history.csv 에 게시일과 함께 기록한다 (가격 추이).
 - K12 가격이 기준가(기본 $200) 미만이면 GitHub 이슈로 알린다 (선택: 텔레그램).
 
+`python monitor.py` 는 최근 글만, `SINCE=2026-01-01 python monitor.py` 는 그 날짜까지 거슬러 수집한다.
 외부 의존성 없이 표준 라이브러리만 사용한다.
 """
 
 import csv
 import html
+import http.cookiejar
 import json
 import os
 import re
@@ -17,56 +21,42 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone, timedelta
 
 BOARD_ID = "ppomppu8"
-BASE = "https://m.ppomppu.co.kr/new/"
-LIST_URL = BASE + "bbs_list.php?id={board}&page={page}"
-VIEW_URL = BASE + "bbs_view.php?id={board}&no={no}"
-# 해외(GitHub 서버) IP 에서는 게시판 페이지가 403 으로 막히지만 RSS 는 열려 있다.
-# RSS 에는 제목과 본문(description)이 모두 들어 있다.
-RSS_URL = "https://www.ppomppu.co.kr/rss.php?id={board}"
+SEARCH_URL = ("https://www.ppomppu.co.kr/search_bbs.php?search_type=sub_memo&page_no={page}"
+              "&keyword={kw}&page_size=50&bbs_id={board}&order_type=date")
+VIEW_URL = "https://www.ppomppu.co.kr/zboard/view.php?id={board}&no={no}"
 
 THRESHOLD_USD = float(os.environ.get("THRESHOLD_USD", "200"))
 KRW_PER_USD = float(os.environ.get("KRW_PER_USD", "1400"))
-PAGES = int(os.environ.get("PAGES", "2"))
+# 비어 있으면 검색 1페이지(최근 50개)만, 날짜를 주면 그 날짜 이전 글이 나올 때까지 페이지를 넘긴다.
+SINCE = os.environ.get("SINCE", "")
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "40"))
 # 쿠폰 할인액("$30 할인") 같은 숫자를 가격으로 오인하지 않도록 하한을 둔다.
 MIN_PLAUSIBLE_USD = float(os.environ.get("MIN_PLAUSIBLE_USD", "80"))
 HISTORY_FILE = os.environ.get("HISTORY_FILE", "data/price_history.csv")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
-UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-)
-KST = timezone(timedelta(hours=9))
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
 
 # ---------------------------------------------------------------- fetching
 
-
-import http.cookiejar  # noqa: E402
-
-# 뽐뿌는 첫 요청에 쿠키를 심고 302 로 되돌려 보내므로 쿠키를 유지해야 한다.
 _opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 
 def fetch(url):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "ko-KR,ko;q=0.9",
-            "Referer": BASE + "bbs_list.php?id=" + BOARD_ID,
-        },
-    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    })
     try:
         with _opener.open(req, timeout=30) as resp:
             raw = resp.read()
             charset = resp.headers.get_content_charset()
     except urllib.error.HTTPError as e:
-        snippet = e.read()[:500].decode("cp949", errors="replace")
-        print(f"HTTP {e.code} {e.url}\n{snippet}")
+        print(f"HTTP {e.code} {e.url}\n{e.read()[:300].decode('cp949', errors='replace')}")
         raise
     if not charset:
         m = re.search(rb'charset=["\']?([\w-]+)', raw[:3000], re.I)
@@ -74,20 +64,6 @@ def fetch(url):
     if charset.lower() in ("euc-kr", "ks_c_5601-1987"):
         charset = "cp949"  # euc-kr 의 상위집합
     return raw.decode(charset, errors="replace")
-
-
-def list_post_ids(page_html):
-    ids = []
-    for m in re.finditer(r'href="([^"]*bbs_view\.php\?[^"]*)"', page_html):
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(html.unescape(m.group(1))).query)
-        if q.get("id", [None])[0] == BOARD_ID and q.get("no"):
-            no = q["no"][0]
-            if no.isdigit() and no not in ids:
-                ids.append(no)
-    return ids
-
-
-# ---------------------------------------------------------------- parsing
 
 
 def html_to_text(s):
@@ -99,63 +75,69 @@ def html_to_text(s):
     return re.sub(r"\n\s*\n+", "\n", s).strip()
 
 
-def extract_title(page_html):
-    for pat in (
-        r'(?is)<meta\s+property="og:title"\s+content="([^"]*)"',
-        r"(?is)<h4[^>]*>(.*?)</h4>",
-        r"(?is)<title>(.*?)</title>",
-    ):
-        m = re.search(pat, page_html)
-        if m:
-            t = html_to_text(m.group(1))
-            if t:
-                return t
-    return ""
+def parse_search(page_html):
+    """통합검색 결과 → [{no, title, body(본문 앞부분), date, url}]"""
+    out = []
+    for block in page_html.split('<div class="conts">')[1:]:
+        m = re.search(r"view\.php\?id=" + BOARD_ID + r"&(?:amp;)?no=(\d+)", block)
+        if not m:
+            continue
+        no = m.group(1)
+        t = re.search(r'(?is)<span class="title">\s*<a[^>]*>(.*?)(?:<font class=.comment-cnt|</a>)', block)
+        b = re.search(r'(?is)<p style="height:\s*45px">\s*<a[^>]*>(.*?)</a>', block)
+        d = re.search(r"<span>\s*(20\d\d)\.(\d\d)\.(\d\d)\s*</span>", block)
+        out.append({
+            "no": no,
+            "title": html_to_text(t.group(1)) if t else "",
+            "body": html_to_text(b.group(1)) if b else "",
+            "date": "-".join(d.groups()) if d else "",
+            "url": VIEW_URL.format(board=BOARD_ID, no=no),
+        })
+    return out
 
 
-def extract_body(page_html):
-    """본문 영역만 뽑는다. 사이드바의 다른 글 제목에 속지 않도록 가능한 좁게 잡는다."""
-    for pat in (
-        r'(?is)<div[^>]+class="[^"]*\bcont\b[^"]*"[^>]*>(.*?)<div[^>]+class="[^"]*(?:cmAr|comment|reply)',
-        r'(?is)<td[^>]+class="[^"]*board-contents[^"]*"[^>]*>(.*?)</td>',
-        r'(?is)<div[^>]+id="KH_Content"[^>]*>(.*?)</div>',
-        r'(?is)<div[^>]+class="[^"]*\bcont\b[^"]*"[^>]*>(.*?)</div>\s*</div>',
-    ):
-        m = re.search(pat, page_html)
-        if m and len(html_to_text(m.group(1))) > 20:
-            return html_to_text(m.group(1))
-    return html_to_text(page_html)
+# ---------------------------------------------------------------- products
 
 
 def _rx(p):
     return re.compile(p, re.I)
 
 
-# 감시 대상 상품. match 의 정규식이 모두 (제목+본문 기준) 나와야 해당 상품 글로 본다.
-# alert=True 인 상품만 기준가 미만일 때 알림, 나머지는 가격 기록만 한다.
+F1_RE = _rx(r"(?:firebat|파이어\s?뱃)\s*f1(?![0-9])")
+
+# 감시 대상 상품.
+#   anchor : 가격 위치를 찾는 기준이 되는 상품명
+#   search : 통합검색 키워드 (검색이 본문까지 보므로, 본문에만 적힌 글도 찾는다)
+#   match  : 제목/본문 앞부분에 모두 보여야 하는 조건 (다른 상품 글 제외용)
+#   price_anchor : 상품명이 제목에 없을 때 대신 가격을 찾을 이름 (예: 제목의 "FIREBAT F1($254)")
+#   alert  : 기준가 미만이면 알림
 PRODUCTS = [
     {
-        "key": "gmktec-k12",
-        "name": "GMKtec K12",
-        "anchor": _rx(r"(?<![a-z0-9])k[\s-]?12(?![0-9])"),
+        "key": "gmktec-k12", "name": "GMKtec K12",
+        "anchor": _rx(r"(?<![a-z0-9])k[\s-]?12(?![0-9])"), "search": ["K12"],
         "match": [_rx(r"gmk\s?tec|gmk(?![a-z])|지엠케이|nucbox|누크박스|미니\s?pc|mini\s?pc")],
-        "alert": True,
+        "price_anchor": None, "alert": True,
     },
     {
-        "key": "firebat-f1-7640hs",
-        "name": "FIREBAT F1 7640HS",
-        "anchor": _rx(r"7640\s?hs"),
-        "match": [_rx(r"firebat|파이어\s?뱃"), _rx(r"(?<![a-z0-9])f1(?![0-9])")],
-        "alert": False,
+        "key": "firebat-f1-7640hs", "name": "FIREBAT F1 7640HS",
+        "anchor": _rx(r"7640\s?hs"), "search": ["7640HS"],
+        "match": [F1_RE], "price_anchor": F1_RE, "alert": False,
     },
     {
-        "key": "firebat-f1-h255",
-        "name": "FIREBAT F1 H255",
-        "anchor": _rx(r"(?<![a-z0-9])h\s?255(?![0-9])"),
-        "match": [_rx(r"firebat|파이어\s?뱃"), _rx(r"(?<![a-z0-9])f1(?![0-9])")],
-        "alert": False,
+        "key": "firebat-f1-h255", "name": "FIREBAT F1 H255",
+        "anchor": _rx(r"(?<![a-z0-9])h\s?255(?![0-9])"), "search": ["H255"],
+        "match": [F1_RE], "price_anchor": F1_RE, "alert": False,
+    },
+    {
+        # 세부 모델(7640HS/H255)을 알 수 없는 FIREBAT F1 글. 위 두 모델로 분류되지 않을 때만 기록.
+        "key": "firebat-f1", "name": "FIREBAT F1 (모델 미표기)",
+        "anchor": F1_RE, "search": ["FIREBAT", "파이어뱃"],
+        "match": [], "price_anchor": None, "alert": False,
+        "fallback_for": ["firebat-f1-7640hs", "firebat-f1-h255"],
     },
 ]
+
+# ---------------------------------------------------------------- prices
 
 NUM = r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?"
 USD_PATTERNS = [
@@ -208,86 +190,138 @@ def find_prices(text):
     return out
 
 
-def pick_price(prices):
-    """'할인가/최저가' 로 표시된 가격이 있으면 그중 최저, 없으면 전체 최저."""
-    finals = [p for p in prices if p[3] == "final"]
-    return min(finals or prices, key=lambda p: p[0]) if prices else None
-
-
-def product_segments(text, product):
-    """본문에서 해당 상품 이름 뒤 ~ 다른 상품 이름 전까지 구간 (여러 상품 모음글 대비)."""
-    others = [p["anchor"] for p in PRODUCTS if p is not product]
+def segments(text, anchor, product, limit):
+    """anchor 뒤 ~ 다른 감시상품 이름 전까지 구간 (여러 상품 모음글 대비)."""
+    others = [p["anchor"] for p in PRODUCTS if p is not product and p["anchor"] is not anchor]
     segs = []
-    for m in product["anchor"].finditer(text):
-        end = min(len(text), m.end() + 800)
+    for m in anchor.finditer(text):
+        end = min(len(text), m.end() + limit)
         for o in others:
             om = o.search(text, m.end(), end)
             if om:
                 end = min(end, om.start())
-        segs.append((m.start(), end))
+        segs.append((m.end(), end))
     return segs
 
 
-def analyze(title, body, product):
-    """해당 상품 글이면 dict 반환, 아니면 None."""
+def title_price(title, anchor, product):
+    """제목: '상품명($가격)' 형식 → 상품명 바로 뒤 첫 가격. 할인가/최저가 표기가 있으면 그것."""
+    for lo, hi in segments(title, anchor, product, 60):
+        prices = find_prices(title[lo:hi])
+        finals = [p for p in prices if p[3] == "final"]
+        if finals:
+            return min(finals, key=lambda p: p[0]), lo
+        if prices:
+            return prices[0], lo
+    return None, 0
+
+
+def body_price(body, anchor, product):
+    """본문: 상품명 뒤 구간에서 할인가/최저가 우선, 없으면 최저가."""
+    prices = [(v, s, pos + lo, k) for lo, hi in segments(body, anchor, product, 800)
+              for v, s, pos, k in find_prices(body[lo:hi])]
+    finals = [p for p in prices if p[3] == "final"]
+    return min(finals or prices, key=lambda p: p[0]) if prices else None
+
+
+def analyze(title, body, product, mentioned=False):
+    """해당 상품 글이면 dict, 아니면 None.
+    mentioned: 통합검색이 (보이지 않는 본문까지 포함해) 이 상품명으로 이 글을 찾았는지."""
     full = title + "\n" + body
-    if not product["anchor"].search(full):
+    if not (product["anchor"].search(full) or mentioned):
         return None
     if not all(r.search(full) for r in product["match"]):
         return None
 
-    in_title = bool(product["anchor"].search(title))
-    # 1순위: 제목 가격 (뽐뿌 제목은 보통 "(가격/배송비)" 형식). 제목에 다른 상품도 있으면 건너뜀.
-    title_has_other = any(p["anchor"].search(title) for p in PRODUCTS if p is not product)
-    best, source, src = None, "none", ""
-    if in_title and not title_has_other:
-        best, source, src = pick_price(find_prices(title)), "title", title
-    if not best:
-        # 2순위: 본문에서 상품 이름 근처 구간
-        prices = [p for lo, hi in product_segments(body, product)
-                  for p in find_prices(body[lo:hi])
-                  for p in [(p[0], p[1], p[2] + lo, p[3])]]
-        if not prices and in_title and not title_has_other:
-            prices = find_prices(body)  # 단일 상품 글: 본문 전체
-        best, source, src = pick_price(prices), "body", body
-    if not best:
-        return {"price": None, "price_text": "", "source": "none", "context": ""}
-    ctx = src[max(0, best[2] - 120): best[2] + 120].replace("\n", " ")
+    anchors = [product["anchor"]]
+    if product["price_anchor"] is not None and not product["anchor"].search(title):
+        anchors.append(product["price_anchor"])
+    for anchor in anchors:
+        best, off = title_price(title, anchor, product)
+        if best:
+            return _result(best, "title", title, off)
+    for anchor in anchors:
+        best = body_price(body, anchor, product)
+        if best:
+            return _result(best, "body", body, 0)
+    return {"price": None, "price_text": "", "source": "none", "context": ""}
+
+
+def _result(best, source, src, off):
+    pos = best[2] + off
+    ctx = src[max(0, pos - 120): pos + 120].replace("\n", " ")
     return {"price": best[0], "price_text": best[1], "source": source, "context": ctx}
+
+
+def analyze_post(post):
+    """글 하나 → 상품별 결과 [(product, res)]"""
+    results = {}
+    for product in PRODUCTS:
+        if product.get("fallback_for") and any(k in results for k in product["fallback_for"]):
+            continue
+        mentioned = product["key"] in post.get("hits", ())
+        res = analyze(post["title"], post["body"], product, mentioned)
+        if res:
+            results[product["key"]] = (product, res)
+    return list(results.values())
+
+
+# ---------------------------------------------------------------- collecting
+
+
+def collect():
+    """상품별 검색어로 통합검색 → {no: post}. post['hits'] = 검색에 걸린 상품 key 집합."""
+    posts = {}
+    for product in PRODUCTS:
+        for kw in product["search"]:
+            q = urllib.parse.quote(kw, encoding="cp949")
+            for page in range(1, (MAX_PAGES if SINCE else 1) + 1):
+                found = parse_search(fetch(SEARCH_URL.format(page=page, kw=q, board=BOARD_ID)))
+                time.sleep(1)
+                print(f"search '{kw}' page {page}: {len(found)} posts")
+                for p in found:
+                    posts.setdefault(p["no"], {**p, "hits": set()})["hits"].add(product["key"])
+                dates = [p["date"] for p in found if p["date"]]
+                if not found or (SINCE and dates and min(dates) < SINCE):
+                    break
+    if SINCE:
+        posts = {no: p for no, p in posts.items() if not p["date"] or p["date"] >= SINCE}
+    return posts
 
 
 # ---------------------------------------------------------------- outputs
 
+FIELDS = ["posted_at", "product", "post_no", "price_usd", "price_text", "source", "title", "url"]
 
-def append_history(rows):
-    """새 글이거나 가격이 바뀐 경우만 기록 → 가격 추이 확인용."""
+
+def save_history(rows):
+    """(상품, 글번호) 단위로 최신 값을 유지. 새 글이거나 가격이 바뀐 것만 반환."""
     os.makedirs(os.path.dirname(HISTORY_FILE) or ".", exist_ok=True)
-    last = {}
+    existing = {}
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                last[(r.get("product", "gmktec-k12"), r["post_no"])] = r["price_usd"]
-    new = [r for r in rows if last.get((r["product"], r["post_no"])) != r["price_usd"]]
-    if not new:
-        return []
-    write_header = not os.path.exists(HISTORY_FILE)
-    with open(HISTORY_FILE, "a", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["checked_at_kst", "posted_at_kst", "product", "post_no", "price_usd", "price_text", "title", "url"])
-        if write_header:
-            w.writeheader()
-        w.writerows(new)
-    return new
+                existing[(r.get("product", ""), r.get("post_no", ""))] = {k: r.get(k, "") for k in FIELDS}
+    changed = []
+    for r in rows:
+        key = (r["product"], r["post_no"])
+        if key not in existing or existing[key]["price_usd"] != r["price_usd"]:
+            changed.append(r)
+        existing[key] = r
+    with open(HISTORY_FILE, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS)
+        w.writeheader()
+        w.writerows(sorted(existing.values(), key=lambda r: (r["product"], r["posted_at"], r["post_no"])))
+    return changed
 
 
 def github_api(method, path, data=None):
-    token = os.environ["GITHUB_TOKEN"]
-    repo = os.environ["GITHUB_REPOSITORY"]
     req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}{path}",
+        f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}{path}",
         method=method,
         data=json.dumps(data).encode() if data is not None else None,
         headers={
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
         },
@@ -305,7 +339,7 @@ def notify(hit):
     title = f"[K12 ${hit['price']:.2f}] {hit['title'][:80]} [뽐뿌#{hit['post_no']}]"
     body = (
         f"GMKtec K12 가격이 **${hit['price']:.2f}** 로 기준가 ${THRESHOLD_USD:.0f} 미만입니다.\n\n"
-        f"- 글: {hit['url']}\n"
+        f"- 글: {hit['url']} ({hit['posted_at']})\n"
         f"- 제목: {hit['title']}\n"
         f"- 가격 표기: `{hit['price_text']}` ({'제목' if hit['source'] == 'title' else '본문'}에서 추출)\n"
         f"- 원화 환산 기준: 1 USD = {KRW_PER_USD:.0f} KRW\n\n"
@@ -334,80 +368,27 @@ def notify(hit):
 # ---------------------------------------------------------------- main
 
 
-def rss_posts():
-    """RSS 에서 [{no, title, body, date, url}] 를 얻는다."""
-    import xml.etree.ElementTree as ET
-    from email.utils import parsedate_to_datetime
-
-    root = ET.fromstring(fetch(RSS_URL.format(board=BOARD_ID)).encode("utf-8"))
-    out = []
-    for it in root.findall("./channel/item"):
-        link = html.unescape(it.findtext("link") or "")
-        m = re.search(r"[?&]no=(\d+)", link)
-        if not m:
-            continue
-        date = ""
-        if it.findtext("pubDate"):
-            try:
-                date = parsedate_to_datetime(it.findtext("pubDate")).astimezone(KST).strftime("%Y-%m-%d %H:%M")
-            except (TypeError, ValueError):
-                pass
-        out.append({
-            "no": m.group(1),
-            "title": html_to_text(it.findtext("title") or ""),
-            "body": html_to_text(html.unescape(it.findtext("description") or "")),
-            "date": date,
-            "url": VIEW_URL.format(board=BOARD_ID, no=m.group(1)),
-        })
-    return out
-
-
-def page_posts():
-    """게시판 페이지를 직접 읽는다 (국내 IP 등 페이지 접근이 되는 환경용)."""
-    ids = []
-    for page in range(1, PAGES + 1):
-        found = list_post_ids(fetch(LIST_URL.format(board=BOARD_ID, page=page)))
-        print(f"list page {page}: {len(found)} posts")
-        ids += [i for i in found if i not in ids]
-    for no in ids:
-        url = VIEW_URL.format(board=BOARD_ID, no=no)
-        try:
-            page_html = fetch(url)
-        except Exception as e:  # 한 글 실패로 전체를 멈추지 않는다
-            print(f"skip {no}: {e}")
-            continue
-        time.sleep(1)
-        yield {"no": no, "title": extract_title(page_html), "body": extract_body(page_html),
-               "date": "", "url": url}
-
-
 def main():
-    try:
-        posts = rss_posts()
-        print(f"rss: {len(posts)} posts")
-    except Exception as e:
-        print(f"rss failed ({e}), falling back to board pages")
-        posts = page_posts()
+    posts = collect()
+    if not posts:
+        print("ERROR: 검색 결과가 하나도 없습니다 (차단 또는 페이지 구조 변경).")
+        return 1
 
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    rows, hits, count = [], [], 0
-    for post in posts:
-        count += 1
-        no, title, body, url = post["no"], post["title"], post["body"], post["url"]
-        for product in PRODUCTS:
-            res = analyze(title, body, product)
-            if not res:
-                continue
-            print(f"{product['name']} post {no}: price={res['price']} ({res['price_text']}) {title}")
+    rows, hits = [], []
+    for post in posts.values():
+        for product, res in analyze_post(post):
             price = "" if res["price"] is None else f"{res['price']:.2f}"
-            rows.append({"checked_at_kst": now, "posted_at_kst": post["date"], "product": product["key"], "post_no": no,
-                         "price_usd": price, "price_text": res["price_text"], "title": title, "url": url})
-            if product["alert"] and res["price"] is not None and res["price"] < THRESHOLD_USD:
-                hits.append({**res, "post_no": no, "title": title, "url": url})
+            print(f"{post['date']} {product['name']}: {price or '가격 미확인'} ({res['price_text']}) {post['title']}")
+            row = {"posted_at": post["date"], "product": product["key"], "post_no": post["no"],
+                   "price_usd": price, "price_text": res["price_text"], "source": res["source"],
+                   "title": post["title"], "url": post["url"]}
+            rows.append(row)
+            # 알림은 최근 글만 (과거 글 수집 시에는 알리지 않음)
+            if product["alert"] and not SINCE and res["price"] is not None and res["price"] < THRESHOLD_USD:
+                hits.append({**res, **row})
 
-    print(f"checked {count} posts, product posts: {len(rows)}, K12 under ${THRESHOLD_USD:.0f}: {len(hits)}")
-    for r in append_history(rows):
-        print("history +", r["post_no"], r["price_usd"])
+    changed = save_history(rows)
+    print(f"posts {len(posts)}, product rows {len(rows)}, new/changed {len(changed)}, alerts {len(hits)}")
     for h in hits:
         notify(h)
     return 0
