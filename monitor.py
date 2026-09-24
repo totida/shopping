@@ -5,6 +5,7 @@
 - 가격은 제목의 "상품명($가격)" 표기를 우선, 없으면 검색결과에 보이는 본문 앞부분에서 뽑는다.
 - 결과는 data/price_history.csv 에 게시일과 함께 기록한다 (가격 추이).
 - K12 가격이 기준가(기본 $200) 미만이면 GitHub 이슈로 알린다 (선택: 텔레그램).
+- K12 언급 글인데 가격을 못 읽었으면 '가격 확인 필요' 알림을 보낸다.
 
 `python monitor.py` 는 최근 글만, `SINCE=2026-01-01 python monitor.py` 는 그 날짜까지 거슬러 수집한다.
 외부 의존성 없이 표준 라이브러리만 사용한다.
@@ -21,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 BOARD_ID = "ppomppu8"
 SEARCH_URL = ("https://www.ppomppu.co.kr/search_bbs.php?search_type=sub_memo&page_no={page}"
@@ -36,6 +38,8 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "40"))
 MIN_PLAUSIBLE_USD = float(os.environ.get("MIN_PLAUSIBLE_USD", "80"))
 HISTORY_FILE = os.environ.get("HISTORY_FILE", "data/price_history.csv")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
+# 이 일수 이내에 올라온 글만 알림 (첫 실행 때 지난 글 알림이 쏟아지지 않도록)
+ALERT_DAYS = int(os.environ.get("ALERT_DAYS", "2"))
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36")
@@ -336,16 +340,27 @@ def already_alerted(no):
 
 
 def notify(hit):
-    title = f"[K12 ${hit['price']:.2f}] {hit['title'][:80]} [뽐뿌#{hit['post_no']}]"
-    body = (
-        f"GMKtec K12 가격이 **${hit['price']:.2f}** 로 기준가 ${THRESHOLD_USD:.0f} 미만입니다.\n\n"
-        f"- 글: {hit['url']} ({hit['posted_at']})\n"
-        f"- 제목: {hit['title']}\n"
-        f"- 가격 표기: `{hit['price_text']}` ({'제목' if hit['source'] == 'title' else '본문'}에서 추출)\n"
-        f"- 원화 환산 기준: 1 USD = {KRW_PER_USD:.0f} KRW\n\n"
-        f"> …{hit['context']}…\n\n"
-        "자동 추출이라 오인식일 수 있으니 글을 직접 확인해 주세요."
-    )
+    where = "제목" if hit["source"] == "title" else "본문"
+    if hit["price"] is None:
+        title = f"[K12 가격 확인 필요] {hit['title'][:80]} [뽐뿌#{hit['post_no']}]"
+        body = (
+            "본문에 GMKtec K12 가 언급된 글인데, 가격이 본문 뒤쪽에 있어 자동으로 읽지 못했습니다.\n"
+            "(해외 서버에서는 글 전체를 열 수 없어 검색결과의 본문 앞부분만 보입니다.)\n\n"
+            f"- 글: {hit['url']} ({hit['posted_at']})\n"
+            f"- 제목: {hit['title']}\n\n"
+            "링크를 열어 K12 가격이 $%.0f 미만인지 확인해 주세요." % THRESHOLD_USD
+        )
+    else:
+        title = f"[K12 ${hit['price']:.2f}] {hit['title'][:80]} [뽐뿌#{hit['post_no']}]"
+        body = (
+            f"GMKtec K12 가격이 **${hit['price']:.2f}** 로 기준가 ${THRESHOLD_USD:.0f} 미만입니다.\n\n"
+            f"- 글: {hit['url']} ({hit['posted_at']})\n"
+            f"- 제목: {hit['title']}\n"
+            f"- 가격 표기: `{hit['price_text']}` ({where}에서 추출)\n"
+            f"- 원화 환산 기준: 1 USD = {KRW_PER_USD:.0f} KRW\n\n"
+            f"> …{hit['context']}…\n\n"
+            "자동 추출이라 오인식일 수 있으니 글을 직접 확인해 주세요."
+        )
     if DRY_RUN or not os.environ.get("GITHUB_TOKEN"):
         print("[DRY] would alert:", title)
         return
@@ -357,7 +372,8 @@ def notify(hit):
 
     tg_token, tg_chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if tg_token and tg_chat:
-        msg = f"GMKtec K12 ${hit['price']:.2f}\n{hit['title']}\n{hit['url']}"
+        head = "K12 가격 확인 필요" if hit["price"] is None else f"GMKtec K12 ${hit['price']:.2f}"
+        msg = f"{head}\n{hit['title']}\n{hit['url']}"
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{tg_token}/sendMessage",
             data=urllib.parse.urlencode({"chat_id": tg_chat, "text": msg}).encode(),
@@ -374,6 +390,7 @@ def main():
         print("ERROR: 검색 결과가 하나도 없습니다 (차단 또는 페이지 구조 변경).")
         return 1
 
+    alert_since = (datetime.now(timezone(timedelta(hours=9))) - timedelta(days=ALERT_DAYS)).strftime("%Y-%m-%d")
     rows, hits = [], []
     for post in posts.values():
         for product, res in analyze_post(post):
@@ -384,8 +401,12 @@ def main():
                    "title": post["title"], "url": post["url"]}
             rows.append(row)
             # 알림은 최근 글만 (과거 글 수집 시에는 알리지 않음)
-            if product["alert"] and not SINCE and res["price"] is not None and res["price"] < THRESHOLD_USD:
-                hits.append({**res, **row})
+            if product["alert"] and not SINCE and post["date"] >= alert_since:
+                if res["price"] is not None and res["price"] < THRESHOLD_USD:
+                    hits.append({**res, **row})
+                elif res["price"] is None:
+                    # 본문 뒤쪽에만 K12 가 있어 가격을 못 읽은 글 → 직접 확인하도록 알림
+                    hits.append({**res, **row})
 
     changed = save_history(rows)
     print(f"posts {len(posts)}, product rows {len(rows)}, new/changed {len(changed)}, alerts {len(hits)}")
