@@ -415,10 +415,13 @@ def notify(hit):
     github_api("POST", "/issues", {"title": title, "body": body, "labels": ["price-alert"]})
     print("ALERT issue created:", title)
 
+    head = "K12 가격 확인 필요" if hit["price"] is None else f"GMKtec K12 ${hit['price']:.2f}"
+    send_telegram(f"{head}\n{hit['title']}\n{hit['url']}")
+
+
+def send_telegram(msg):
     tg_token, tg_chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if tg_token and tg_chat:
-        head = "K12 가격 확인 필요" if hit["price"] is None else f"GMKtec K12 ${hit['price']:.2f}"
-        msg = f"{head}\n{hit['title']}\n{hit['url']}"
         urllib.request.urlopen(
             f"https://api.telegram.org/bot{tg_token}/sendMessage",
             data=urllib.parse.urlencode({"chat_id": tg_chat, "text": msg}).encode(),
@@ -426,10 +429,30 @@ def notify(hit):
         )
 
 
+def send_test_alert():
+    """알림이 실제로 오는지 확인용. 실제 알림과 같은 방식(price-alert 이슈)으로 보낸다."""
+    now = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+    title = f"[테스트 알림] 가격 알림이 잘 오는지 확인 ({now} KST)"
+    body = (
+        "가격 감시에서 보낸 **시험 알림**입니다. 실제 특가 알림도 이 형태로 옵니다.\n\n"
+        "- 이 이슈를 GitHub 알림(앱 푸시/메일)으로 받으셨다면 설정이 끝난 것입니다.\n"
+        "- 확인하셨으면 이 이슈는 닫아 주세요 (Close issue)."
+    )
+    if DRY_RUN or not os.environ.get("GITHUB_TOKEN"):
+        print("[DRY] would send test alert:", title)
+        return 0
+    issue = github_api("POST", "/issues", {"title": title, "body": body, "labels": ["price-alert"]})
+    print("TEST issue created:", issue.get("html_url"))
+    send_telegram(f"[테스트 알림] 가격 알림 확인용\n{issue.get('html_url')}")
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 
 def main():
+    if os.environ.get("TEST_ALERT") == "true":
+        return send_test_alert()
     posts = collect()
     if not posts:
         print("ERROR: 검색 결과가 하나도 없습니다 (차단 또는 페이지 구조 변경).")

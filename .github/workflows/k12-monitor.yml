@@ -5,6 +5,11 @@ on:
     # 정각은 GitHub 예약 실행이 몰려 밀리거나 빠지기 쉬워 7분·37분에 실행
     - cron: "7,37 * * * *"  # 30분마다 (GitHub 사정으로 몇 분 늦을 수 있음)
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "시험 알림만 보내기 (감시는 하지 않음)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write  # 가격 기록(data/price_history.csv) 커밋
@@ -32,6 +37,7 @@ jobs:
           KRW_PER_USD: "1400"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_ALERT: ${{ inputs.test_alert }}
         run: python monitor.py
 
       - name: Commit price history

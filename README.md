@@ -23,3 +23,7 @@
 Actions → *Price history backfill* → Run workflow (기본: 2026-01-01 이후).
 
 테스트: `python -m unittest discover -s tests`
+
+## 시험 알림
+Actions → *GMKtec K12 price monitor* → Run workflow → **시험 알림만 보내기** 체크 → Run.
+`[테스트 알림]` 이슈가 만들어지고, 알림(앱 푸시/메일)이 오는지 확인할 수 있습니다.
