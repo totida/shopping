@@ -154,6 +154,15 @@ PRODUCTS = [
     },
 ]
 
+# 램/SSD 가 빠진 베어본 구성은 FIREBAT F1 비교 대상(완제품)과 가격대가 달라 기록하지 않는다.
+BAREBONE_RE = _rx(r"베어\s?본|barebone")
+NO_BAREBONE = {"firebat-f1-7640hs", "firebat-f1-h255", "firebat-f1"}
+
+# 자동으로 걸러지지 않아 사람이 확인하고 뺀 글: (상품 key, 글번호) → 이유
+MANUAL_EXCLUDE = {
+    ("firebat-f1-7640hs", "100107"): "베어본 구성 (제목에 표기 없음, 사용자 확인)",
+}
+
 # ---------------------------------------------------------------- prices
 
 NUM = r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?"
@@ -258,6 +267,8 @@ def analyze(title, body, product, mentioned=False):
         if p is not product and p["price_anchor"] is not None)
     if product["price_anchor"] is not None and not product["anchor"].search(title) and not other_variant_in_title:
         anchors.append(product["price_anchor"])
+    if product["key"] in NO_BAREBONE and is_barebone(title, body, product, anchors):
+        return None
     for anchor in anchors:
         best, off = title_price(title, anchor, product)
         if best:
@@ -267,6 +278,17 @@ def analyze(title, body, product, mentioned=False):
         if best:
             return _result(best, "body", body, 0, anchor is not product["anchor"])
     return {"price": None, "price_text": "", "source": "none", "context": "", "alias": False}
+
+
+def is_barebone(title, body, product, anchors):
+    """상품명 바로 뒤 구간(제목 80자, 본문 300자)에 '베어본' 이 있으면 True."""
+    for text, limit in ((title, 80), (body, 300)):
+        for anchor in anchors:
+            for m in anchor.finditer(text):
+                lo, hi = next(((a, b) for a, b in segments(text[m.start():], anchor, product, limit)), (0, 0))
+                if BAREBONE_RE.search(text[m.start(): m.start() + hi]):
+                    return True
+    return False
 
 
 def _result(best, source, src, off, alias=False):
@@ -287,6 +309,8 @@ def analyze_post(post):
             results[product["key"]] = (product, res)
     # 제목에 모델 없이 "FIREBAT F1($254)" 만 있고 본문에 두 모델이 다 나오면 어느 모델 가격인지 알 수 없다
     # → 두 모델 모두에서 빼고 '모델 미표기' 로 기록
+    for key in [k for k in results if (k, post.get("no")) in MANUAL_EXCLUDE]:
+        del results[key]
     alias_keys = [k for k, (p, r) in results.items() if r.get("alias") and p.get("price_anchor") is not None]
     if len(alias_keys) >= 2:
         for k in alias_keys:
@@ -345,6 +369,8 @@ def save_history(rows):
         with open(HISTORY_FILE, encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 existing[(r.get("product", ""), r.get("post_no", ""))] = {k: r.get(k, "") for k in FIELDS}
+    for key in MANUAL_EXCLUDE:
+        existing.pop(key, None)
     changed = []
     for r in rows:
         key = (r["product"], r["post_no"])

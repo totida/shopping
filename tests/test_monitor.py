@@ -125,6 +125,17 @@ class AnalyzeTest(unittest.TestCase):
         got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
         self.assertEqual(got, {"firebat-f1-h255": 340, "firebat-f1-7640hs": None})
 
+    def test_barebone_excluded_for_firebat_only(self):
+        title = "[특가] GMKtec K12 베어본 ($174), FIREBAT F1 7640HS 베어본 ($192)"
+        self.assertIsNone(analyze(title, "", F1_7640))
+        self.assertAlmostEqual(analyze(title, "", K12)["price"], 174)
+        title = "[특가] GMKtec K12 베어본 ($174), FIREBAT F1 7640HS 24G 512G ($254)"
+        self.assertAlmostEqual(analyze(title, "", F1_7640)["price"], 254)
+
+    def test_manual_exclude(self):
+        post = {"no": "100107", "title": "FIREBAT F1 미니 PC AMD Ryzen 5 ($192)무배", "body": "", "hits": set()}
+        self.assertEqual(monitor.analyze_post(post), [])
+
 
 if __name__ == "__main__":
     unittest.main()
