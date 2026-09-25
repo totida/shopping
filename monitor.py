@@ -412,11 +412,23 @@ def notify(hit):
     if already_alerted(hit["post_no"], hit["title"][:80]):
         print("already alerted:", hit["post_no"])
         return
-    github_api("POST", "/issues", {"title": title, "body": body, "labels": ["price-alert"]})
+    create_alert_issue(title, body)
     print("ALERT issue created:", title)
 
     head = "K12 가격 확인 필요" if hit["price"] is None else f"GMKtec K12 ${hit['price']:.2f}"
     send_telegram(f"{head}\n{hit['title']}\n{hit['url']}")
+
+
+def create_alert_issue(title, body):
+    """저장소 주인에게 배정하고 @멘션한다. 배정/멘션된 이슈는 '직접 관련' 알림이라
+    GitHub 모바일 앱 푸시와 메일이 기본 설정에서도 온다 (지켜보기만 한 저장소의 새 이슈는 푸시되지 않음)."""
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER") or os.environ["GITHUB_REPOSITORY"].split("/")[0]
+    return github_api("POST", "/issues", {
+        "title": title,
+        "body": f"@{owner}\n\n{body}",
+        "labels": ["price-alert"],
+        "assignees": [owner],
+    })
 
 
 def send_telegram(msg):
@@ -441,7 +453,7 @@ def send_test_alert():
     if DRY_RUN or not os.environ.get("GITHUB_TOKEN"):
         print("[DRY] would send test alert:", title)
         return 0
-    issue = github_api("POST", "/issues", {"title": title, "body": body, "labels": ["price-alert"]})
+    issue = create_alert_issue(title, body)
     print("TEST issue created:", issue.get("html_url"))
     send_telegram(f"[테스트 알림] 가격 알림 확인용\n{issue.get('html_url')}")
     return 0
