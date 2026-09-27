@@ -311,8 +311,11 @@ def analyze_post(post):
     # → 두 모델 모두에서 빼고 '모델 미표기' 로 기록
     for key in [k for k in results if (k, post.get("no")) in MANUAL_EXCLUDE]:
         del results[key]
+    # 제목에 모델 없이 "FIREBAT F1($254)" 만 있는 가격은 어느 모델인지 알 수 없다.
+    # (검색 결과가 페이지마다 달라 두 모델 검색에 다 걸렸는지로도 판단할 수 없음)
+    # → 모델별 기록에서 빼고 '모델 미표기' 로 기록
     alias_keys = [k for k, (p, r) in results.items() if r.get("alias") and p.get("price_anchor") is not None]
-    if len(alias_keys) >= 2:
+    if alias_keys:
         for k in alias_keys:
             del results[k]
         generic = next(p for p in PRODUCTS if p.get("fallback_for"))

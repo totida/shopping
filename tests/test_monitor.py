@@ -79,10 +79,10 @@ class AnalyzeTest(unittest.TestCase):
         self.assertEqual((post["no"], post["date"]), ("99347", "2026-09-15"))
         self.assertTrue(post["title"].startswith("[미니PC특가] GMKtec G3S($116)"))
 
-        # 검색 '7640HS' 에 걸림 → 제목의 "FIREBAT F1($254)" 가 7640HS 가격
+        # 검색 '7640HS' 에 걸려도 제목에 모델 표기가 없으면 '모델 미표기' 로 기록
         post["hits"] = {"firebat-f1-7640hs", "gmktec-k12"}
         got = {p["key"]: r["price"] for p, r in monitor.analyze_post(post)}
-        self.assertEqual(got, {"firebat-f1-7640hs": 254, "gmktec-k12": None})
+        self.assertEqual(got, {"firebat-f1": 254, "gmktec-k12": None})
 
         # 세부 모델 검색에 안 걸리면 모델 미표기 F1 으로 기록
         post["hits"] = {"firebat-f1"}
