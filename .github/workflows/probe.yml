@@ -6,20 +6,43 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Try AliExpress item page
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright
         run: |
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
-          for u in \
-            "https://ko.aliexpress.com/item/1005012353846431.html" \
-            "https://www.aliexpress.com/item/1005012353846431.html" \
-            "https://m.aliexpress.com/item/1005012353846431.html"; do
-            echo "=== $u"
-            curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -H 'Accept-Language: ko-KR,ko;q=0.9' \
-              -o /tmp/p -w 'status=%{http_code} final=%{url_effective} size=%{size_download}\n' "$u" || true
-            grep -o -i -E 'punish|captcha|x5sec|_____tmd_____|slide to verify' /tmp/p | sort | uniq -c | head
-            grep -o -E '"(formatedActivityPrice|formatedPrice|salePrice|minActivityAmount|minAmount|discountPrice|targetSkuPriceInfo)"[^,}]{0,120}' /tmp/p | head -8
-            grep -o -E '<title>[^<]{0,150}' /tmp/p | head -1
-            grep -o -E '(US ?\$|₩|KRW)[ ]?[0-9][0-9,.]*' /tmp/p | sort | uniq -c | sort -rn | head -5
-            sleep 3
-          done
+          npm init -y >/dev/null
+          npm i playwright@1.47.2 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Open item page in a real browser (ship to Korea)
+        run: |
+          cat > p.js <<'JS'
+          const { chromium } = require('playwright');
+          (async () => {
+            const b = await chromium.launch();
+            const ctx = await b.newContext({ locale: 'ko-KR', timezoneId: 'Asia/Seoul',
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36' });
+            await ctx.addCookies([
+              { name: 'aep_usuc_f', value: 'site=kor&c_tp=KRW&region=KR&b_locale=ko_KR', domain: '.aliexpress.com', path: '/' },
+              { name: 'aep_usuc_f', value: 'site=kor&c_tp=KRW&region=KR&b_locale=ko_KR', domain: '.aliexpress.us', path: '/' },
+            ]);
+            const p = await ctx.newPage();
+            await p.goto('https://ko.aliexpress.com/item/1005012353846431.html', { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await p.waitForTimeout(8000);
+            console.log('URL', p.url());
+            console.log('TITLE', (await p.title()).slice(0, 150));
+            const text = await p.evaluate(() => document.body.innerText);
+            console.log('CAPTCHA?', /slide|captcha|verify|인증/i.test(text));
+            const prices = [...new Set(text.match(/(₩|US ?\$|\$)\s?[0-9][0-9,.]*/g) || [])].slice(0, 15);
+            console.log('PRICES', prices);
+            for (const sel of ['[class*="price--current"]', '[class*="price-default--current"]', '[class*="price--original"]', '[class*="price"]']) {
+              const t = await p.$$eval(sel, els => els.slice(0, 3).map(e => e.innerText.trim().replace(/\s+/g, ' ')).filter(Boolean)).catch(() => []);
+              if (t.length) { console.log('SEL', sel, JSON.stringify(t)); }
+            }
+            console.log('TEXT', text.replace(/\s+/g, ' ').slice(0, 1500));
+            await b.close();
+          })();
+          JS
+          node p.js
