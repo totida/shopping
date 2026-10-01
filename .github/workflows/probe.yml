@@ -21,27 +21,41 @@ jobs:
           cat > p.js <<'JS'
           const { chromium } = require('playwright');
           (async () => {
-            const b = await chromium.launch();
-            const ctx = await b.newContext({ locale: 'ko-KR', timezoneId: 'Asia/Seoul',
-              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36' });
-            await ctx.addCookies([
-              { name: 'aep_usuc_f', value: 'site=kor&c_tp=KRW&region=KR&b_locale=ko_KR', domain: '.aliexpress.com', path: '/' },
-              { name: 'aep_usuc_f', value: 'site=kor&c_tp=KRW&region=KR&b_locale=ko_KR', domain: '.aliexpress.us', path: '/' },
-            ]);
+            const b = await chromium.launch({ args: ['--disable-blink-features=AutomationControlled'] });
+            const ctx = await b.newContext({ locale: 'ko-KR', timezoneId: 'Asia/Seoul', viewport: { width: 1366, height: 900 },
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+              extraHTTPHeaders: { 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8' } });
+            await ctx.addInitScript(() => {
+              Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+              Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko'] });
+              Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+              window.chrome = { runtime: {} };
+            });
+            await ctx.addCookies([{ name: 'aep_usuc_f', value: 'site=kor&c_tp=USD&region=KR&b_locale=ko_KR', domain: '.aliexpress.com', path: '/' }]);
             const p = await ctx.newPage();
+            const hits = [];
+            p.on('response', async r => {
+              const u = r.url();
+              if (/mtop|pdp|price|detail/i.test(u) && !/\.(js|css|png|jpg|webp|svg)/.test(u)) {
+                let t = ''; try { t = await r.text(); } catch (e) {}
+                const m = t.match(/"(formatedActivityPrice|formatedAmount|formattedPrice|salePrice|actSkuCalPrice|skuActivityAmount)"[^,}]{0,80}/g);
+                hits.push(r.status() + ' ' + u.slice(0, 120) + ' len=' + t.length + (m ? ' ' + m.slice(0, 4).join(' | ') : ''));
+              }
+            });
             await p.goto('https://ko.aliexpress.com/item/1005012353846431.html', { waitUntil: 'domcontentloaded', timeout: 60000 });
-            await p.waitForTimeout(8000);
+            for (let i = 0; i < 6; i++) { await p.mouse.wheel(0, 600); await p.waitForTimeout(2000); }
+            await p.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
             console.log('URL', p.url());
             console.log('TITLE', (await p.title()).slice(0, 150));
             const text = await p.evaluate(() => document.body.innerText);
-            console.log('CAPTCHA?', /slide|captcha|verify|인증/i.test(text));
-            const prices = [...new Set(text.match(/(₩|US ?\$|\$)\s?[0-9][0-9,.]*/g) || [])].slice(0, 15);
-            console.log('PRICES', prices);
-            for (const sel of ['[class*="price--current"]', '[class*="price-default--current"]', '[class*="price--original"]', '[class*="price"]']) {
-              const t = await p.$$eval(sel, els => els.slice(0, 3).map(e => e.innerText.trim().replace(/\s+/g, ' ')).filter(Boolean)).catch(() => []);
-              if (t.length) { console.log('SEL', sel, JSON.stringify(t)); }
+            console.log('LEN', text.length, 'CAPTCHA?', /slide|captcha|verify|인증|unusual traffic/i.test(text));
+            console.log('PRICES', [...new Set(text.match(/(₩|US ?\$)\s?[0-9][0-9,.]*/g) || [])].slice(0, 15));
+            for (const k of ['코인', '결제혜택', '프로모션', '세일', '원가']) {
+              const i = text.indexOf(k); if (i >= 0) console.log('NEAR', k, text.slice(i, i + 80).replace(/\s+/g, ' '));
             }
-            console.log('TEXT', text.replace(/\s+/g, ' ').slice(0, 1500));
+            console.log('NET', hits.length); hits.slice(0, 15).forEach(h => console.log(' ', h));
+            const html = await p.content();
+            console.log('HTML', html.length, 'runParams?', html.includes('runParams'), 'baxia/punish?', /baxia|punish|x5sec/.test(html));
             await b.close();
           })();
           JS
