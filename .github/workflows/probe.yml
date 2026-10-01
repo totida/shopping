@@ -1,0 +1,25 @@
+name: Connectivity probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try AliExpress item page
+        run: |
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36'
+          for u in \
+            "https://ko.aliexpress.com/item/1005012353846431.html" \
+            "https://www.aliexpress.com/item/1005012353846431.html" \
+            "https://m.aliexpress.com/item/1005012353846431.html"; do
+            echo "=== $u"
+            curl -sS -L -c /tmp/c -b /tmp/c -A "$UA" -H 'Accept-Language: ko-KR,ko;q=0.9' \
+              -o /tmp/p -w 'status=%{http_code} final=%{url_effective} size=%{size_download}\n' "$u" || true
+            grep -o -i -E 'punish|captcha|x5sec|_____tmd_____|slide to verify' /tmp/p | sort | uniq -c | head
+            grep -o -E '"(formatedActivityPrice|formatedPrice|salePrice|minActivityAmount|minAmount|discountPrice|targetSkuPriceInfo)"[^,}]{0,120}' /tmp/p | head -8
+            grep -o -E '<title>[^<]{0,150}' /tmp/p | head -1
+            grep -o -E '(US ?\$|₩|KRW)[ ]?[0-9][0-9,.]*' /tmp/p | sort | uniq -c | sort -rn | head -5
+            sleep 3
+          done
