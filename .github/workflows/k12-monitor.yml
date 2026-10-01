@@ -1,9 +1,9 @@
 name: GMKtec K12 price monitor
 
 on:
-  schedule:
-    # 정각은 GitHub 예약 실행이 몰려 밀리거나 빠지기 쉬워 7분·37분에 실행
-    - cron: "7,37 * * * *"  # 30분마다 (GitHub 사정으로 몇 분 늦을 수 있음)
+  # 자동 실행 중지: 감시를 갤럭시탭(한국 IP)으로 옮김. 다시 켜려면 아래 두 줄의 주석을 푸세요.
+  # schedule:
+  #   - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       test_alert:
